@@ -1,0 +1,8 @@
+#!/bin/sh
+LOG_FILE="/etc/openclash/logs/openclash_monitor.log"
+if [ -f "$LOG_FILE" ]; then
+    echo "===== 本月 OpenClash 监控日志流量消耗 ====="
+    grep "$(date '+%Y-%m')" "$LOG_FILE" | wc -l
+else
+    echo "日志文件不存在: $LOG_FILE"
+fi
