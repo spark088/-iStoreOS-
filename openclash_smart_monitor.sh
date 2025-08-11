@@ -1,85 +1,69 @@
 #!/bin/sh
-# OpenClash 智能监控与测速脚本（改进版）
-# 功能：
-# 1. 自动识别 OpenClash 模式（GLOBAL / RULE）
-# 2. 优先节点匹配：台湾、新加坡、香港
-# 3. 节点离线重试策略：
-#    - 单节点离线：10 小时后重试
-#    - 全部节点离线：20 秒后重试
+# OpenClash 智能监控与切换脚本 (GLaDOS节点优先版)
+# 最后更新: 2025-08-11
 
-# ===== 配置 =====
+# OpenClash API 配置
 OPENCLASH_HOST="127.0.0.1"
 OPENCLASH_PORT="9090"
-SECRET="你的密钥"  # 改成你的 API 密钥
-PRIORITY_REGEX="台湾|TW|Taiwan|新加坡|SG|Singapore|香港|HK|Hong Kong"
+OPENCLASH_SECRET="RjAJ3WCX"  # 你的 OpenClash 密钥
 
-API_URL="http://$OPENCLASH_HOST:$OPENCLASH_PORT"
-AUTH_HEADER="Authorization: Bearer $SECRET"
+# 优先节点关键词（顺序匹配）
+PRIORITY_KEYWORDS=("TW" "SG" "JP" "US")
 
-# 检测 OpenClash 模式
-detect_mode() {
-    mode=$(curl -s -H "$AUTH_HEADER" "$API_URL/configs" | grep -oE '"mode":"[^"]+"' | cut -d'"' -f4 | tr 'A-Z' 'a-z')
-    if [ "$mode" = "global" ]; then
-        PROXY_PATH="/proxies/GLOBAL"
-    elif [ "$mode" = "rule" ]; then
-        PROXY_PATH="/proxies"
-    else
-        echo "[错误] 无法识别 OpenClash 模式，默认使用 RULE"
-        PROXY_PATH="/proxies"
-    fi
-    echo "[信息] 检测到 OpenClash 模式: $mode"
+# API 请求函数
+clash_api() {
+    curl -s -H "Authorization: Bearer $OPENCLASH_SECRET" \
+         "http://$OPENCLASH_HOST:$OPENCLASH_PORT/$1"
+}
+
+# 获取当前节点
+get_current_node() {
+    clash_api "configs" | grep -oP '"Proxy":\s*"\K[^"]+'
 }
 
 # 获取所有节点
-get_nodes() {
-    curl -s -H "$AUTH_HEADER" "$API_URL$PROXY_PATH" | grep -oE '"name":"[^"]+"' | cut -d'"' -f4
-}
-
-# 筛选优先节点
-get_priority_nodes() {
-    get_nodes | grep -E "$PRIORITY_REGEX"
+get_all_nodes() {
+    clash_api "proxies" | grep -oP '"GLaDOS-[^"]+'
 }
 
 # 测试节点延迟
-test_latency() {
-    node="$1"
-    curl -s -H "$AUTH_HEADER" -X PUT "$API_URL$PROXY_PATH/$node/delay" \
-         -d '{"timeout": 3000, "url": "https://www.gstatic.com/generate_204"}' \
-         | grep -oE '"delay":[0-9]+' | cut -d':' -f2
+test_node() {
+    clash_api "proxies/$1/delay?timeout=3000&url=http://www.gstatic.com/generate_204" \
+    | grep -oP '"delay":\s*\K[0-9]+'
 }
 
-# 主循环
-main_loop() {
-    detect_mode
-    while true; do
-        priority_nodes=$(get_priority_nodes)
+# 切换节点
+switch_node() {
+    clash_api "configs" \
+        -X PATCH \
+        -H "Content-Type: application/json" \
+        -d "{\"Proxy\":\"$1\"}" >/dev/null
+}
 
-        if [ -z "$priority_nodes" ]; then
-            echo "[警告] 未找到优先节点，20 秒后重试..."
-            sleep 20
-            continue
-        fi
+# 主程序
+main() {
+    CURRENT_NODE=$(get_current_node)
+    echo "当前节点: $CURRENT_NODE"
 
-        all_offline=true
-        for node in $priority_nodes; do
-            latency=$(test_latency "$node")
-            if [ -n "$latency" ] && [ "$latency" -gt 0 ]; then
-                echo "[信息] 节点 $node 延迟: ${latency}ms"
-                all_offline=false
-            else
-                echo "[警告] 节点 $node 离线，10 小时后重试"
-                sleep 36000 &
+    NODES=$(get_all_nodes)
+
+    for KEY in "${PRIORITY_KEYWORDS[@]}"; do
+        TARGET_NODE=$(echo "$NODES" | grep "$KEY" | head -n 1)
+        if [ -n "$TARGET_NODE" ]; then
+            DELAY=$(test_node "$TARGET_NODE")
+            if [ -n "$DELAY" ] && [ "$DELAY" -lt 500 ]; then
+                if [ "$TARGET_NODE" != "$CURRENT_NODE" ]; then
+                    echo "$(date '+%F %T') 切换节点: $CURRENT_NODE → $TARGET_NODE (延迟 ${DELAY}ms)"
+                    switch_node "$TARGET_NODE"
+                else
+                    echo "已在优先节点 $CURRENT_NODE，无需切换"
+                fi
+                exit 0
             fi
-        done
-
-        if $all_offline; then
-            echo "[警告] 所有优先节点掉线，20 秒后重试..."
-            sleep 20
-        else
-            echo "[信息] 本轮检测完成，180 秒后再次检测"
-            sleep 180
         fi
     done
+
+    echo "没有找到可用节点，保持当前节点 $CURRENT_NODE"
 }
 
-main_loop
+main
