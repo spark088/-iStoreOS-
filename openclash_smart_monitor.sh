@@ -1,89 +1,85 @@
 #!/bin/sh
-# OpenClash 智能测速脚本（自动模式识别版）
-# 作者: GPT定制版
-# 日期: 2025-08-11
+# OpenClash 智能监控与测速脚本（改进版）
+# 功能：
+# 1. 自动识别 OpenClash 模式（GLOBAL / RULE）
+# 2. 优先节点匹配：台湾、新加坡、香港
+# 3. 节点离线重试策略：
+#    - 单节点离线：10 小时后重试
+#    - 全部节点离线：20 秒后重试
 
-# ============ 配置区 ============
+# ===== 配置 =====
 OPENCLASH_HOST="127.0.0.1"
 OPENCLASH_PORT="9090"
-OPENCLASH_SECRET="RjAJ3WCX"
+SECRET="你的密钥"  # 改成你的 API 密钥
+PRIORITY_REGEX="台湾|TW|Taiwan|新加坡|SG|Singapore|香港|HK|Hong Kong"
 
-# 优先节点匹配关键字（正则）
-PRIORITY_NODES="台湾|TW|Taiwan|新加坡|SG|Singapore|香港|HK|Hong"
+API_URL="http://$OPENCLASH_HOST:$OPENCLASH_PORT"
+AUTH_HEADER="Authorization: Bearer $SECRET"
 
-# API URL 生成
-api_get() {
-    curl -s -m 3 -H "Authorization: Bearer $OPENCLASH_SECRET" \
-         "http://$OPENCLASH_HOST:$OPENCLASH_PORT$1"
-}
-
-api_put() {
-    curl -s -m 3 -X PUT -H "Authorization: Bearer $OPENCLASH_SECRET" \
-         -H "Content-Type: application/json" \
-         -d "$2" "http://$OPENCLASH_HOST:$OPENCLASH_PORT$1"
-}
-
-# 检测当前 OpenClash 模式
+# 检测 OpenClash 模式
 detect_mode() {
-    MODE=$(api_get "/configs" | grep -o '"mode":"[^"]*' | cut -d'"' -f4)
-    if [ -z "$MODE" ]; then
-        echo "[错误] 无法获取 OpenClash 模式，默认使用 GLOBAL"
-        MODE="GLOBAL"
+    mode=$(curl -s -H "$AUTH_HEADER" "$API_URL/configs" | grep -oE '"mode":"[^"]+"' | cut -d'"' -f4 | tr 'A-Z' 'a-z')
+    if [ "$mode" = "global" ]; then
+        PROXY_PATH="/proxies/GLOBAL"
+    elif [ "$mode" = "rule" ]; then
+        PROXY_PATH="/proxies"
+    else
+        echo "[错误] 无法识别 OpenClash 模式，默认使用 RULE"
+        PROXY_PATH="/proxies"
     fi
-    echo "[信息] 检测到 OpenClash 模式: $MODE"
+    echo "[信息] 检测到 OpenClash 模式: $mode"
 }
 
-# 获取优先节点列表
+# 获取所有节点
+get_nodes() {
+    curl -s -H "$AUTH_HEADER" "$API_URL$PROXY_PATH" | grep -oE '"name":"[^"]+"' | cut -d'"' -f4
+}
+
+# 筛选优先节点
 get_priority_nodes() {
-    api_get "/proxies/$MODE" | grep -E "$PRIORITY_NODES" | awk -F '"' '{print $4}'
+    get_nodes | grep -E "$PRIORITY_REGEX"
 }
 
-# 节点测速
-test_node() {
-    NODE=$1
-    DELAY=$(api_get "/proxies/$NODE/delay?timeout=5000&url=https://www.google.com/generate_204" \
-            | grep -o '"delay":[0-9]*' | cut -d':' -f2)
-    [ -z "$DELAY" ] && DELAY=0
-    echo "$NODE:$DELAY"
+# 测试节点延迟
+test_latency() {
+    node="$1"
+    curl -s -H "$AUTH_HEADER" -X PUT "$API_URL$PROXY_PATH/$node/delay" \
+         -d '{"timeout": 3000, "url": "https://www.gstatic.com/generate_204"}' \
+         | grep -oE '"delay":[0-9]+' | cut -d':' -f2
 }
 
 # 主循环
 main_loop() {
+    detect_mode
     while true; do
-        PRIORITY_LIST=$(get_priority_nodes)
+        priority_nodes=$(get_priority_nodes)
 
-        if [ -z "$PRIORITY_LIST" ]; then
+        if [ -z "$priority_nodes" ]; then
             echo "[警告] 未找到优先节点，20 秒后重试..."
             sleep 20
             continue
         fi
 
-        ONLINE_COUNT=0
-        for NODE in $PRIORITY_LIST; do
-            RESULT=$(test_node "$NODE")
-            DELAY=$(echo "$RESULT" | cut -d':' -f2)
-
-            if [ "$DELAY" -gt 0 ]; then
-                echo "[在线] $NODE 延迟 ${DELAY}ms"
-                ONLINE_COUNT=$((ONLINE_COUNT+1))
+        all_offline=true
+        for node in $priority_nodes; do
+            latency=$(test_latency "$node")
+            if [ -n "$latency" ] && [ "$latency" -gt 0 ]; then
+                echo "[信息] 节点 $node 延迟: ${latency}ms"
+                all_offline=false
             else
-                echo "[离线] $NODE，10 小时后重试"
-                sleep 2
-                # 延迟到10小时后再测（后台执行）
-                (sleep 36000 && test_node "$NODE" > /dev/null) &
+                echo "[警告] 节点 $node 离线，10 小时后重试"
+                sleep 36000 &
             fi
         done
 
-        if [ "$ONLINE_COUNT" -eq 0 ]; then
+        if $all_offline; then
             echo "[警告] 所有优先节点掉线，20 秒后重试..."
             sleep 20
         else
-            echo "[信息] 测速完成，5 分钟后再次检测"
-            sleep 300
+            echo "[信息] 本轮检测完成，180 秒后再次检测"
+            sleep 180
         fi
     done
 }
 
-# 入口
-detect_mode
 main_loop
