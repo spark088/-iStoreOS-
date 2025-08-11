@@ -1,0 +1,2 @@
+#!/bin/sh
+tail -f /etc/openclash/logs/openclash_monitor.log
